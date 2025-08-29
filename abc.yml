@@ -1,0 +1,121 @@
+parameters:
+  name: Build
+  timeout: 30
+  pool: ubuntu-latest
+  vault_addr: "https://vault.example.com"
+  azure_service_connection: "My-Azure-Service-Connection"
+  vault_user_role: "packer-role"
+  DT_TOKEN_PROD: ""
+  working_directory: "$(System.DefaultWorkingDirectory)"
+  packer_directory: "$(System.DefaultWorkingDirectory)/packer"
+  build_artifacts_directory: "$(Build.ArtifactStagingDirectory)"
+
+jobs:
+  - job: ${{ parameters.name }}
+    displayName: "Packer Build Job"
+    timeoutInMinutes: ${{ parameters.timeout }}
+    pool:
+      vmImage: ${{ parameters.pool }}
+
+    steps:
+      - checkout: self
+        clean: true
+        persistCredentials: true
+
+      - task: Bash@3
+        displayName: "Show Environment"
+        inputs:
+          targetType: inline
+          script: |
+            echo "Agent OS: $(Agent.OS)"
+            echo "Working directory: ${{ parameters.working_directory }}"
+            echo "Packer directory: ${{ parameters.packer_directory }}"
+            echo "Build artifacts directory: ${{ parameters.build_artifacts_directory }}"
+
+      - task: AzureCLI@2
+        displayName: "Login to Azure"
+        inputs:
+          azureSubscription: ${{ parameters.azure_service_connection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            echo "✅ Successfully logged into Azure"
+            az account show
+
+      - task: Bash@3
+        displayName: "Set Vault Environment Variables"
+        inputs:
+          targetType: inline
+          script: |
+            echo "Exporting Vault environment variables..."
+            echo "##vso[task.setvariable variable=VAULT_ADDR]${{ parameters.vault_addr }}"
+            echo "##vso[task.setvariable variable=VAULT_USER_ROLE]${{ parameters.vault_user_role }}"
+            echo "##vso[task.setvariable variable=DT_TOKEN_PROD]${{ parameters.DT_TOKEN_PROD }}"
+            echo "VAULT_ADDR=${{ parameters.vault_addr }}"
+            echo "VAULT_USER_ROLE=${{ parameters.vault_user_role }}"
+
+      - task: Bash@3
+        displayName: "Install Dependencies"
+        inputs:
+          targetType: inline
+          script: |
+            echo "Installing dependencies..."
+            sudo apt-get update -y
+            sudo apt-get install -y unzip curl jq
+            echo "Checking packer version..."
+            packer --version || echo "Packer not found"
+
+      - task: Bash@3
+        displayName: "Validate Packer Templates"
+        inputs:
+          targetType: inline
+          script: |
+            echo "Validating packer templates..."
+            cd ${{ parameters.packer_directory }}
+            packer validate .
+
+      - task: Bash@3
+        displayName: "Run Packer Init"
+        inputs:
+          targetType: inline
+          script: |
+            echo "Running packer init..."
+            cd ${{ parameters.packer_directory }}
+            packer init .
+
+      - task: Bash@3
+        displayName: "Run Packer Build"
+        inputs:
+          targetType: inline
+          script: |
+            echo "Running packer build..."
+            cd ${{ parameters.packer_directory }}
+            packer build .
+
+      - task: Bash@3
+        displayName: "Archive Packer Build Artifacts"
+        inputs:
+          targetType: inline
+          script: |
+            echo "Archiving packer output..."
+            mkdir -p ${{ parameters.build_artifacts_directory }}
+            cp -r ${{ parameters.packer_directory }}/output-* ${{ parameters.build_artifacts_directory }}/ || true
+            ls -lah ${{ parameters.build_artifacts_directory }}
+
+      - task: PublishBuildArtifacts@1
+        displayName: "Publish Artifacts"
+        inputs:
+          PathtoPublish: "${{ parameters.build_artifacts_directory }}"
+          ArtifactName: "packer-artifacts"
+          publishLocation: "Container"
+
+      - task: Bash@3
+        displayName: "Cleanup"
+        condition: always()
+        inputs:
+          targetType: inline
+          script: |
+            echo "Cleaning up temporary files..."
+            rm -rf ${{ parameters.packer_directory }}/.terraform || true
+            rm -rf ${{ parameters.packer_directory }}/packer.d || true
+            echo "Cleanup complete ✅"
